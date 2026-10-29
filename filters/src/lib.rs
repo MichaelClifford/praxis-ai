@@ -33,6 +33,7 @@ mod time_to_first_token;
 #[cfg(feature = "token-rate-limit-filter")]
 mod token_rate_limit;
 mod token_usage;
+pub mod traffic_mirror;
 
 pub use agentic::{a2a::A2aFilter, mcp::McpFilter};
 #[cfg(feature = "aws-sigv4-filter")]
@@ -61,6 +62,7 @@ pub use token_rate_limit::TokenRateLimitFilter;
 #[cfg(feature = "token-ceiling-filter")]
 pub use token_usage::TokenCeilingFilter;
 pub use token_usage::{StreamUsageInjectFilter, TokenCountFilter, TokenUsageHeadersFilter};
+pub use traffic_mirror::TrafficMirrorFilter;
 
 /// Build an isolated client after installing the process-wide crypto provider.
 ///

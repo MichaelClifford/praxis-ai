@@ -119,6 +119,7 @@ mod token_counting;
 #[cfg(feature = "token-rate-limit-filter")]
 mod token_rate_limit;
 mod token_usage_headers;
+mod traffic_mirror;
 mod vector_stores_routing;
 #[cfg(feature = "vertex-anthropic-filter")]
 mod vertex_anthropic;

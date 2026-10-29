@@ -1,0 +1,85 @@
+# Traffic Mirror
+#
+# Captures bounded, read-only copies of the request and response bodies
+# and POSTs one JSON record per request to an external collector for
+# analysis. Delivery is fire-and-forget: a slow or down collector never
+# adds latency to, or fails, the proxied request. Headers are not
+# captured, so injected upstream credentials never reach the collector.
+#
+# Pair this with an adapter that translates the mirror envelope into
+# your analysis backend — see examples/mlflow-adapter for one that
+# writes MLflow traces.
+#
+# Envelope (schema praxis.traffic_mirror.v1):
+#   POST {url}
+#   {
+#     "schema": "praxis.traffic_mirror.v1",
+#     "timestamp": "...", "request_id": "...",
+#     "method": "POST", "path": "/v1/chat/completions",
+#     "cluster": "backend", "status": 200, "duration_ms": 123,
+#     "token_input": 10, "token_output": 20, "token_total": 30,
+#     "request":  { "body": "...", "body_bytes": 2048, "truncated": false },
+#     "response": { "body": "...", "body_bytes": 8192, "truncated": false }
+#   }
+#
+# Pipeline ordering matters: traffic_mirror is declared before
+# token_count so that response hooks (which run in reverse order) execute
+# token_count first, writing token.input / token.output / token.total to
+# filter_metadata, then traffic_mirror reads them and includes them in
+# the envelope. token_* fields are omitted when token_count is absent.
+# On SSE streams, a complete terminal event can trigger delivery before
+# the proxy observes transport EOF. In that case response contains
+# end_of_stream_observed: false, and token_* may be absent even if
+# token_count is present; the terminal SSE event carries provider usage.
+#
+# Usage:
+#   # terminal 1: a collector that logs what it receives
+#   python3 -m http.server 9090  # or the MLflow adapter
+#
+#   # terminal 2:
+#   cargo run -p praxis-ai-proxy -- -c examples/configs/traffic-mirror.yaml
+#
+#   # terminal 3:
+#   curl -X POST http://localhost:8080/v1/chat/completions \
+#     -H "Content-Type: application/json" \
+#     -d '{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}'
+#
+# The collector receives the envelope above with the request and response
+# bodies embedded.
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: traffic_mirror
+        url: "http://127.0.0.1:9090/ingest"
+        # The collector in this example listens on loopback, a
+        # non-public address, so callouts must be explicitly opted in.
+        allow_private_addresses: true
+        timeout_seconds: 5
+        # Per-body capture cap (request and response each). Bytes past
+        # the cap are counted but not captured; the record is marked
+        # truncated: true.
+        max_body_bytes: 1048576
+
+      - filter: token_count
+        provider: openai
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

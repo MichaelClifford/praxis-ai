@@ -24,7 +24,7 @@ use crate::{
     A2aFilter, AiGuardrailsFilter, CredentialInjectFilter, ExternalMeteringFilter, IdentityHeaderGuardFilter,
     InFlightRegistry, IntelligentRouteFilter, LlmisvcModelProviderResolverFilter, McpFilter, ModelToHeaderFilter,
     ModelToProviderFilter, PromptEnrichFilter, ProviderRouteFilter, StreamUsageInjectFilter, TimeToFirstTokenFilter,
-    TokenCountFilter, TokenUsageHeadersFilter,
+    TokenCountFilter, TokenUsageHeadersFilter, TrafficMirrorFilter,
 };
 
 /// Register all in-tree AI HTTP filters into `registry`.
@@ -52,6 +52,7 @@ pub fn register_ai_filters(registry: &mut FilterRegistry, subrequest_client: Opt
     register_general_ai_filters(registry);
     register_ai_guardrails(registry, subrequest_client);
     register_external_metering(registry, subrequest_client);
+    register_traffic_mirror(registry, subrequest_client);
     register_anthropic_filters(registry, subrequest_client);
     register_openai_filters(registry);
     #[cfg(feature = "store")]
@@ -288,6 +289,28 @@ fn register_external_metering(registry: &mut FilterRegistry, subrequest_client: 
         praxis_filter::register_filters!(
             @register registry,
             http "external_metering" => ExternalMeteringFilter::from_config
+        );
+    }
+}
+
+/// Register the traffic mirror filter, capturing the shared sub-request
+/// client when one is available.
+#[expect(clippy::panic, reason = "duplicate filter registration is a fatal configuration bug")]
+fn register_traffic_mirror(registry: &mut FilterRegistry, subrequest_client: Option<&SubRequestClient>) {
+    if let Some(client) = subrequest_client {
+        let client = client.clone();
+        registry
+            .register(
+                "traffic_mirror",
+                praxis_filter::FilterFactory::Http(std::sync::Arc::new(move |config| {
+                    TrafficMirrorFilter::from_config_with_client(config, client.clone())
+                })),
+            )
+            .unwrap_or_else(|_| panic!("duplicate filter name: 'traffic_mirror'"));
+    } else {
+        praxis_filter::register_filters!(
+            @register registry,
+            http "traffic_mirror" => TrafficMirrorFilter::from_config
         );
     }
 }
@@ -744,6 +767,7 @@ mod tests {
             "intelligent_route",
             "provider_route",
             "credential_inject",
+            "traffic_mirror",
             "anthropic_web_search",
             "request_id",
             "openai_chat_completions_to_azureai_chat_completions",
