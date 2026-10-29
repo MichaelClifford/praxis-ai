@@ -87,6 +87,7 @@ for how these are authored and regenerated.
 | [token-rate-limit.yaml](configs/token-rate-limit.yaml) | Reserves an estimated token cost at admission time and reconciles that reservation against actual provider-reported usage once the response completes |
 | [token-usage-headers.yaml](configs/token-usage-headers.yaml) | Inject Praxis-Token-Input, Praxis-Token-Output, and Praxis-Token-Total headers into downstream responses when token counts are available in filter metadata |
 | [token-usage-metrics.yaml](configs/token-usage-metrics.yaml) | Opt-in, cardinality-bounded per-tenant token counters |
+| [traffic-mirror.yaml](configs/traffic-mirror.yaml) | Captures bounded, read-only copies of the request and response bodies and POSTs one JSON record per request to an external collector for analysis |
 
 ### Anthropic
 

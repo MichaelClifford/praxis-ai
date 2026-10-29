@@ -175,3 +175,9 @@ see the [Praxis core filter reference][core-ref].
 | [`token_count`](token_count.md) | Extracts token usage from AI inference responses and writes unified counts to [`filter_metadata`]. |
 | [`token_usage_headers`](token_usage_headers.md) | Injects `Praxis-Token-Input`, `Praxis-Token-Output`, and `Praxis-Token-Total` headers into downstream responses when token usage data is present in [`filter_metadata`]. Also injects `Praxis-Token-Status` when usage capture failed (e.g. overflow), so an unavailable count is never silently indistinguishable from a genuine zero. |
 | [`token_usage_metrics`](token_usage_metrics.md) | Emits bounded per-tenant Prometheus token counters from `token.*` metadata. |
+
+### Traffic Mirror
+
+| Filter | Description |
+|--------|-------------|
+| [`traffic_mirror`](traffic_mirror.md) | Mirrors bounded request/response bodies to an external collector. |

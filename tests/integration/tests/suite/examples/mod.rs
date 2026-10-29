@@ -196,6 +196,7 @@ mod token_rate_limit;
 mod token_rate_limit_sentinel;
 mod token_usage_headers;
 mod token_usage_metrics;
+mod traffic_mirror;
 mod vector_stores_routing;
 #[cfg(feature = "vertex-anthropic-filter")]
 mod vertex_anthropic;
