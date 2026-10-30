@@ -3,6 +3,7 @@
 import os
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import mlflow
@@ -11,6 +12,7 @@ _tracking = tempfile.TemporaryDirectory()
 os.environ["MLFLOW_ALLOW_FILE_STORE"] = "true"
 mlflow.set_tracking_uri(_tracking.name)
 import mlflow_adapter as adapter  # noqa: E402 - set the test tracking store before import
+from session_resolver import SessionResolver
 
 
 class AdapterTests(unittest.TestCase):
@@ -101,14 +103,15 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(content[1], request["input"][0]["content"][1])
 
     def test_session_uses_client_cache_key_not_message_prefix(self):
+        resolver = SessionResolver()
         first = [{"role": "system", "content": "help"}, {"role": "user", "content": "hello"}]
         later = first + [{"role": "assistant", "content": "hi"}, {"role": "user", "content": "again"}]
-        self.assertEqual(adapter.session_id({"messages": first, "prompt_cache_key": "session-a"}), "session-a")
-        self.assertEqual(adapter.session_id({"messages": later, "prompt_cache_key": "session-a"}), "session-a")
-        self.assertEqual(adapter.session_id({"messages": first, "prompt_cache_key": "session-b"}), "session-b")
-        self.assertIsNone(adapter.session_id({"messages": first}))
-        self.assertIsNone(adapter.session_id({"prompt_cache_key": "  "}))
-        self.assertIsNone(adapter.session_id({"prompt_cache_key": 42}))
+        self.assertEqual(resolver.resolve({"messages": first, "prompt_cache_key": "session-a"}, {})[0], "session-a")
+        self.assertEqual(resolver.resolve({"messages": later, "prompt_cache_key": "session-a"}, {})[0], "session-a")
+        self.assertEqual(resolver.resolve({"messages": first, "prompt_cache_key": "session-b"}, {})[0], "session-b")
+        for invalid in (None, "  ", 42):
+            generated, _, _ = resolver.resolve({"messages": first, "prompt_cache_key": invalid}, {})
+            self.assertTrue(generated.startswith("praxis-"))
 
     def test_session_diagnostics_do_not_log_request_values(self):
         request = {
@@ -140,7 +143,6 @@ class AdapterTests(unittest.TestCase):
             "messages": later[-2:]
         })
         self.assertEqual(request["messages"], later, "do not mutate the original request")
-        self.assertEqual(adapter.session_id(request), "session-a")
         response_request = {"model": "gpt-4o", "input": later}
         self.assertEqual(adapter.trace_inputs(response_request)["messages"], later[-2:])
         self.assertEqual(adapter.trace_inputs({"input": "new message"}), {
@@ -181,6 +183,7 @@ class AdapterTests(unittest.TestCase):
             "duration_ms": 10, "method": "POST", "path": "/v1/responses", "status": 200,
             "response": {"body": "{}"},
         }
+        inferred = None
         for cache_key in ("session-one", "session-two", None):
             body = {"model": "gpt-4o", "input": [{"role": "user", "content": "same opening prompt"}]}
             if cache_key is not None:
@@ -190,7 +193,13 @@ class AdapterTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200, response.json)
             mlflow.flush_trace_async_logging()
             trace = adapter.client.get_trace(response.json["trace_id"])
-            self.assertEqual(trace.info.trace_metadata.get("mlflow.trace.session"), cache_key)
+            session = trace.info.trace_metadata.get("mlflow.trace.session")
+            if cache_key is None:
+                self.assertTrue(session.startswith("praxis-"))
+                inferred = session
+            else:
+                self.assertEqual(session, cache_key)
+        self.assertNotIn(inferred, ("session-one", "session-two"))
         experiment = mlflow.get_experiment_by_name(adapter.EXPERIMENT_NAME)
         sessions = mlflow.search_sessions(locations=[experiment.experiment_id])
         self.assertTrue({"session-one", "session-two"}.issubset({session.id for session in sessions}))
@@ -200,6 +209,20 @@ class AdapterTests(unittest.TestCase):
             response = adapter.app.test_client().post("/ingest", json={"schema": "praxis.traffic_mirror.v1"})
         self.assertEqual(response.status_code, 400)
         start.assert_not_called()
+
+    def test_truncated_request_still_receives_a_session_id(self):
+        envelope = {
+            "schema": "praxis.traffic_mirror.v1", "timestamp": datetime.now(timezone.utc).isoformat(),
+            "duration_ms": 1, "method": "POST", "path": "/v1/chat/completions", "status": 200,
+            "request": {"body": '{"messages": [', "truncated": True},
+            "response": {"body": '{}'},
+        }
+        posted = adapter.app.test_client().post("/ingest", json=envelope)
+        self.assertEqual(posted.status_code, 200, posted.json)
+        mlflow.flush_trace_async_logging()
+        trace = adapter.client.get_trace(posted.json["trace_id"])
+        self.assertTrue(trace.info.trace_metadata["mlflow.trace.session"].startswith("praxis-"))
+        self.assertEqual(trace.info.tags["praxis.session.source"], "new")
 
     def test_terminal_sse_record_preserves_end_of_stream_indicator(self):
         envelope = {
@@ -217,6 +240,31 @@ class AdapterTests(unittest.TestCase):
         mlflow.flush_trace_async_logging()
         trace = adapter.client.get_trace(response.json["trace_id"])
         self.assertEqual(trace.info.tags["response_end_of_stream_observed"], "false")
+
+    def test_restart_restores_session_from_mlflow_tags(self):
+        envelope = {
+            "schema": "praxis.traffic_mirror.v1", "timestamp": datetime.now(timezone.utc).isoformat(),
+            "duration_ms": 10, "method": "POST", "path": "/v1/chat/completions", "status": 200,
+            "request": {"body": adapter.json.dumps({
+                "model": "model-a", "messages": [{"role": "user", "content": "restart example"}],
+            })},
+            "response": {"body": adapter.json.dumps({
+                "choices": [{"message": {"role": "assistant", "content": "reply"}}],
+            })},
+        }
+        posted = adapter.app.test_client().post("/ingest", json=envelope)
+        self.assertEqual(posted.status_code, 200, posted.json)
+        mlflow.flush_trace_async_logging()
+        trace = adapter.client.get_trace(posted.json["trace_id"])
+        recovered = SessionResolver()
+        recovered.restore(adapter.client, adapter.experiment.experiment_id)
+        followup = {"model": "different-model", "messages": [
+            {"role": "user", "content": "restart example"},
+            {"role": "assistant", "content": "reply"},
+            {"role": "user", "content": "second turn"},
+        ]}
+        matched, source, _ = recovered.resolve(followup, {"choices": []})
+        self.assertEqual((matched, source), (trace.info.trace_metadata["mlflow.trace.session"], "history"))
 
     def test_get_upgrade_probe_is_accepted_but_not_traced(self):
         with patch.object(adapter.client, "start_trace") as start:

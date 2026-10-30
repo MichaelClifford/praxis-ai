@@ -53,6 +53,9 @@ from flask import Flask, request
 from mlflow import MlflowClient
 from mlflow.entities import SpanType
 from mlflow.tracing.constant import SpanAttributeKey
+from session_resolver import (
+    HISTORY_DIGEST_TAG, HISTORY_LENGTH_TAG, USER_DIGEST_TAG, USER_LENGTH_TAG, SessionResolver,
+)
 
 LISTEN_PORT = int(os.environ.get("MIRROR_ADAPTER_PORT", "9090"))
 EXPERIMENT_NAME = os.environ.get("MLFLOW_EXPERIMENT_NAME", "praxis-ai-gateway")
@@ -61,7 +64,12 @@ LOG_SESSION_FIELDS = os.environ.get("MIRROR_ADAPTER_LOG_SESSION_FIELDS") == "1"
 app = Flask(__name__)
 app.logger.setLevel(logging.INFO)
 client = MlflowClient()
-mlflow.set_experiment(EXPERIMENT_NAME)
+experiment = mlflow.set_experiment(EXPERIMENT_NAME)
+sessions = SessionResolver()
+try:
+    sessions.restore(client, experiment.experiment_id)
+except Exception as error:
+    app.logger.warning("Could not restore recent session matches from MLflow: %s", error)
 
 
 def body_text(record) -> str:
@@ -197,14 +205,6 @@ def token_usage(envelope, response):
     if "total_tokens" not in result and "input_tokens" in result and "output_tokens" in result:
         result["total_tokens"] = result["input_tokens"] + result["output_tokens"]
     return result
-
-
-def session_id(request_body):
-    """Use the client's stable per-session prompt cache key, if supplied."""
-    if not isinstance(request_body, dict):
-        return None
-    key = request_body.get("prompt_cache_key")
-    return key if isinstance(key, str) and key.strip() else None
 
 
 def session_field_diagnostics(request_body):
@@ -382,6 +382,16 @@ def ingest():
             "total_tokens": "token_total",
         }[key]
         tags[proxy_key] = str(value)
+    conversation, _, correlation_tags = sessions.resolve(req_parsed, output, resp_text)
+    tags.update(correlation_tags)
+    if LOG_SESSION_FIELDS:
+        app.logger.info(
+            "Session match: path=%s source=%s session_hash=%s history=%s/%s users=%s/%s",
+            envelope.get("path"), correlation_tags["praxis.session.source"],
+            hashlib.sha256(conversation.encode("utf-8")).hexdigest()[:12],
+            correlation_tags.get(HISTORY_LENGTH_TAG, 0), correlation_tags.get(HISTORY_DIGEST_TAG, "")[:12],
+            correlation_tags.get(USER_LENGTH_TAG, 0), correlation_tags.get(USER_DIGEST_TAG, "")[:12],
+        )
 
     attributes = {SpanAttributeKey.MODEL: model}
     if counts:
@@ -394,9 +404,7 @@ def ingest():
     metadata = {}
     if envelope.get("request_id") not in (None, "", "-"):
         metadata["praxis.request_id"] = str(envelope["request_id"])
-    conversation = session_id(req_parsed)
-    if conversation:
-        metadata["mlflow.trace.session"] = conversation
+    metadata["mlflow.trace.session"] = conversation
 
     # The client API creates a root span without requiring a live span context.
     # Trace context supplies immutable metadata when the trace is created.

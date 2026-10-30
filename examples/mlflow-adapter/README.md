@@ -11,11 +11,25 @@ Completions output is stored in MLflow's OpenAI message format, so assistant
 text and model-requested function calls appear in the chat view. Model, status,
 cluster, duration, and token usage are trace tags.
 The proxy timestamp and duration set the trace timeline; token usage and
-model are also MLflow LLM span attributes for cost estimates. The client's
-`prompt_cache_key` supplies the MLflow session ID, so different OpenCode
-sessions don't merge just because they started with the same prompt. Requests
-without that key are not assigned an inferred session. Proxy request IDs are
-trace metadata.
+model are also MLflow LLM span attributes for cost estimates. Every trace gets
+a session ID. The adapter prefers the client's `prompt_cache_key` or
+`previous_response_id`, then uniquely matching conversation history across
+models and providers. A new conversation receives a random ID: identical
+opening prompts never automatically merge. Ambiguous or truncated histories
+may split a real conversation rather than falsely merging two. Proxy request
+IDs are trace metadata.
+
+When a provider switch reformats assistant/tool messages, a unique prefix of
+at least **two prior user turns** can also link the conversation across
+providers. A single shared opening prompt is never enough evidence. Enable
+`MIRROR_ADAPTER_LOG_SESSION_FIELDS=1` to log hashed match diagnostics (no
+prompt text) when investigating an unexpected split.
+
+Correlation is bounded to 256 recently active sessions (24-hour expiry) and
+retains only hashes of message text, not an in-memory copy of prompts. Recent
+fingerprints are recorded as MLflow trace tags so the adapter can try to
+recover matches after a restart. Restoration is best-effort; if MLflow is
+unavailable, or a trace was not yet persisted, new requests get new IDs.
 
 The mirror observes provider HTTP traffic, not tool execution inside OpenCode.
 It can display function calls requested by the model and tool results sent in
